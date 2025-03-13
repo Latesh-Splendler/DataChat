@@ -1,1 +1,11 @@
-streamlit>=1.26.0
+streamlit
+pandas
+pandasai
+pandasai[excel]
+pandasai[connectors]
+google-cloud-storage
+matplotlib
+tiktoken
+openai
+langchain
+yahoo_fin
