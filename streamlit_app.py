@@ -1,20 +1,21 @@
-#pip install pandasai  
-#pip install pandasai[excel]
-#pip install pandasai[connectors]
-import os, csv, matplotlib, tiktoken, streamlit as st, pandas as pd
+# Required installations
+# pip install pandasai  
+# pip install pandasai[excel]
+# pip install pandasai[connectors]
+
+import os, csv, streamlit as st, pandas as pd, tiktoken, matplotlib
 from pandasai import SmartDataframe
 from pandasai.connectors import PandasConnector
 from pandasai.connectors.yahoo_finance import YahooFinanceConnector
-from pandasai.llm import OpenAI
-from pandasai.llm import GoogleGemini
+from pandasai.llm import OpenAI, GoogleGemini
 from pandasai.helpers.openai_info import get_openai_callback
 from pandasai.responses.response_parser import ResponseParser
 from google.cloud import storage
 
-
 class OutputParser(ResponseParser):
     def __init__(self, context) -> None:
         super().__init__(context)
+    
     def parse(self, result):
         if result['type'] == "dataframe":
             st.dataframe(result['value'])
@@ -24,225 +25,110 @@ class OutputParser(ResponseParser):
             st.write(result['value'])
         return
 
-
 def setup():
     st.header("Chat with your small and large datasets!", anchor=False, divider="red")
-
-    hide_menu_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            </style>
-            """
-    st.markdown(hide_menu_style, unsafe_allow_html=True)
-
+    st.markdown("""
+        <style>
+        #MainMenu {visibility: hidden;}
+        </style>
+        """, unsafe_allow_html=True)
 
 def get_tasks():
     st.sidebar.header("Select a task", divider="rainbow")
-    task = st.sidebar.radio("Choose one:",
+    return st.sidebar.radio("Choose one:",
                             ("Load from local drive, <200MB",
                              "Load from local drive, 200MB+",
                              "Load from Google Storage",
-                             "Yahoo Finance")
-                            )
-    return task
-
+                             "Yahoo Finance"))
 
 def get_llm():
-    st.sidebar.header("Select a LLM", divider='rainbow')
-    llm = st.sidebar.radio("Choose a llm:",
-                           ("OpenAI",
-                            "Google Gemini")
-                           )
-    return llm
-
+    st.sidebar.header("Select an LLM", divider='rainbow')
+    return st.sidebar.radio("Choose a LLM:", ("OpenAI", "Google Gemini"))
 
 def write_read(bucket_name, blob_name, projectid):
     storage_client = storage.Client(project=projectid)
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-
+    
     with blob.open('r') as file:
         reader = csv.reader(file)
-        header = next(reader)  
-        data = [row for row in reader] 
-
-    dataframe = []
-    for row in data:
-        row_dict = {header[i]: row[i] for i in range(len(header))}
-        dataframe.append(row_dict)
-
-    return dataframe
-
+        header = next(reader)
+        data = [row for row in reader]
+    
+    return pd.DataFrame([{header[i]: row[i] for i in range(len(header))} for row in data])
 
 def calculate_cost(df):  
     encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")  
-    cost = 0.0005  
-
-    strings = df.apply(lambda row: ' '.join(row.values.astype(str)), axis=1).tolist()  
-    token_count = [len(encoding.encode(rows)) for rows in strings]  
-
-    total_tokens = sum(token_count)     
+    cost_per_token = 0.0005  
+    
+    total_tokens = sum(len(encoding.encode(' '.join(row.values.astype(str)))) for _, row in df.iterrows())
     st.write('Tokens:', total_tokens)  
-    st.write('Cost:', total_tokens * cost / 1000)
-
+    st.write('Cost:', total_tokens * cost_per_token / 1000)
 
 def main():
-    """1. setup page
-       2. setup options - tasks: load or retrieve, models: bamboo, openai, google
-       3. yfinance
-    """
-    
     setup()
     task = get_tasks()
     
-    if task == "Load from local drive, <200MB":
-        dataset = st.file_uploader("Upload your csv or xlsx file", type=['csv','xlsx'])
+    if task.startswith("Load from local drive"):
+        dataset = st.file_uploader("Upload your CSV or XLSX file", type=['csv', 'xlsx'])
         if not dataset: st.stop()
-        df = pd.read_csv(dataset, low_memory=False)
+        
+        try:
+            file_extension = dataset.name.split(".")[-1].lower()
+            df = pd.read_csv(dataset, low_memory=False) if file_extension == "csv" else pd.read_excel(dataset)
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
+            st.stop()
+        
         calculate_cost(df)
         st.write("Data Preview:")
         st.dataframe(df.head())
-        col_desc = st.radio("Do you want to provide column descriptors?",
-                            ("Yes",
-                             "No")
-                            )
-        if col_desc == "Yes":
-            addon = st.text_input("Enter your column description, e.g. 'col1': 'unique id'")
-        else:
-            addon = "None"
+        
+        col_desc = st.radio("Do you want to provide column descriptors?", ("Yes", "No"))
+        addon = st.text_input("Enter your column description (e.g., 'col1': 'unique id')") if col_desc == "Yes" else "None"
         
         if addon:
-            llm = get_llm()
-            if llm == "PandasAI":
-                connector = PandasConnector({"original_df": df}, field_descriptions=addon)
-                sdf = SmartDataframe(connector, {"enable_cache": False})
-                prompt1 = st.text_input("Enter your question/prompt.")
-                if not prompt1: st.stop()
-                response = sdf.chat(prompt1)
-                st.write("Response")
+            llm_choice = get_llm()
+            llm = OpenAI(api_token=OPENAI_API_KEY) if llm_choice == "OpenAI" else GoogleGemini(api_key=GOOGLE_API_KEY)
+            sdf = SmartDataframe(PandasConnector({"original_df": df}, field_descriptions=addon),
+                                 {"enable_cache": False},
+                                 config={"llm": llm, "conversational": False, "response_parser": OutputParser})
+            prompt = st.text_input("Enter your question/prompt.")
+            if not prompt: st.stop()
+            
+            st.write("Response")
+            with get_openai_callback() as cb if llm_choice == "OpenAI" else None:
+                response = sdf.chat(prompt)
                 st.write(response)
                 st.divider()
                 st.write("🧞‍♂️ Under the hood, the code that was executed:")
                 st.code(sdf.last_code_executed)
-                
-            elif llm == "OpenAI":
-                llm = OpenAI(api_token=OPENAI_API_KEY)
-                connector = PandasConnector({"original_df": df}, field_descriptions=addon)
-                sdf = SmartDataframe(connector, {"enable_cache": False}, config={"llm": llm, "conversational": False, 
-                                                        "response_parser": OutputParser})
-                prompt2 = st.text_input("Enter your question/prompt.")
-                if not prompt2: st.stop()
-                st.write("Response")
-                with get_openai_callback() as cb:
-                    response2 = sdf.chat(prompt2)
-                    st.divider()
-                    st.write("🧞‍♂️ Under the hood, the code that was executed:")
-                    st.code(sdf.last_code_executed)
+                if cb:
                     st.divider()
                     st.write("💰 Tokens used and your cost:")
                     st.write(cb)
-                    
-            elif llm == "Google Gemini":
-                llm = GoogleGemini(api_key=GOOGLE_API_KEY)
-                connector = PandasConnector({"original_df": df}, field_descriptions=addon)
-                sdf = SmartDataframe(connector, {"enable_cache": False}, config={"llm": llm, "conversational": False, 
-                                                        "response_parser": OutputParser})
-                prompt3 = st.text_input("Enter your question/prompt.")
-                if not prompt3: st.stop()
-                st.write("Response")
-                response3 = sdf.chat(prompt3)
-                st.divider()
-                st.write("🧞‍♂️ Under the hood, the code that was executed:")
-                st.code(sdf.last_code_executed)
-                    
-                
-    if task == "Load from local drive, 200MB+":
-        filename = st.text_input("Enter your file path including filename, e.g. /users/xyz/abc.csv, .csv files only")
-        if not filename:st.stop()
-        df_large = pd.read_csv(filename, low_memory=False)
-        st.write("Data Preview:")
-        st.dataframe(df_large.head())
-        col_desc = st.radio("Do you want to provide column descriptors?",
-                            ("Yes",
-                             "No")
-                            )
-        if col_desc == "Yes":
-            addon = st.text_input("Enter your column description, e.g. 'col1': 'unique id'")
-        else:
-            addon = "None"
-        
-        if addon:
-            llm = OpenAI(api_token=OPENAI_API_KEY)
-            connector = PandasConnector({"original_df": df_large}, field_descriptions=addon)
-            sdf = SmartDataframe(connector, {"enable_cache": False}, config={"llm": llm, "conversational": False, 
-                                                    "response_parser": OutputParser})
-            prompt6 = st.text_input("Enter your question/prompt.")
-            if not prompt6: st.stop()
-            st.write("Response")
-            with get_openai_callback() as cb:
-                response6 = sdf.chat(prompt6)
-                st.divider()
-                st.write("🧞‍♂️ Under the hood, the code that was executed:")
-                st.code(sdf.last_code_executed)
-                st.divider()
-                st.write("💰 Tokens used and your cost:")
-                st.write(cb)
     
-    
-    if task == "Load from Google Storage":
-        bucket_name = st.text_input("Provide your bucket name from BigQuery.")
-        if not bucket_name: st.stop()
-        blob_name = st.text_input("Provide the blob or object name.")
-        if not blob_name: st.stop()
-        
-        outfile = write_read(bucket_name, blob_name, projectid)        
-        df_bq = pd.DataFrame(outfile)
+    elif task == "Load from Google Storage":
+        bucket_name = st.text_input("Provide your Google Cloud Storage bucket name")
+        blob_name = st.text_input("Provide the blob/object name")
+        if not bucket_name or not blob_name: st.stop()
+        df_bq = write_read(bucket_name, blob_name, projectid)
         st.write("Data Preview:")
         st.dataframe(df_bq.head())
-        
-        col_desc = st.radio("Do you want to provide column descriptors?",
-                            ("Yes",
-                             "No")
-                            )
-        if col_desc == "Yes":
-            addon = st.text_input("Enter your column description, e.g. 'col1': 'unique id'")
-        else:
-            addon = "None"
-
-        if addon:
-            llm = OpenAI(api_token=OPENAI_API_KEY)
-            connector = PandasConnector({"original_df": df_bq}, field_descriptions=addon)
-            sdf = SmartDataframe(connector, {"enable_cache": False}, config={"llm": llm, "conversational": False, 
-                                                    "response_parser": OutputParser})
-            prompt4 = st.text_input("Enter your question/prompt.")
-            if not prompt4: st.stop()
-            st.write("Response")
-            with get_openai_callback() as cb:
-                response4 = sdf.chat(prompt4)
-                st.divider()
-                st.write("🧞‍♂️ Under the hood, the code that was executed:")
-                st.code(sdf.last_code_executed)
-                st.divider()
-                st.write("💰 Tokens used and your cost:")
-                st.write(cb)
-                
-                
-    if task == "Yahoo Finance":
-        stock_symbol = st.text_input("Enter a stock symbol, e.g. MSFT.")
+    
+    elif task == "Yahoo Finance":
+        stock_symbol = st.text_input("Enter a stock symbol (e.g., MSFT)")
         if not stock_symbol: st.stop()
-        yahoo_connector = YahooFinanceConnector(stock_symbol)
-        yahoo_df = SmartDataframe(yahoo_connector, config={"response_parser": OutputParser})
-        prompt5 = st.text_input("Enter your prompt.")
-        if not prompt5: st.stop()
+        yahoo_df = SmartDataframe(YahooFinanceConnector(stock_symbol), config={"response_parser": OutputParser})
+        prompt = st.text_input("Enter your prompt")
+        if not prompt: st.stop()
         st.write("Response")
-        response5 = yahoo_df.chat(prompt5)
+        response = yahoo_df.chat(prompt)
         st.divider()
-        st.code((yahoo_df.last_code_executed))
-        
-
+        st.code(yahoo_df.last_code_executed)
+    
 if __name__ == '__main__':
     OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-    PANDASAI_API_KEY = os.environ.get('PANDASAI_API_KEY')
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
     projectid = os.environ.get('GOOG_PROJECT')
     matplotlib.use("Agg", force=True)
